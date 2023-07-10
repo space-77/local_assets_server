@@ -40,14 +40,10 @@ class SilentLogger implements Logger {
   logOk(String path, String contentType) {}
 }
 
-class AssetsCache {
-  /// Assets cache
-  static Map<String, ByteData> assets = {};
+abstract class CustomRequest {
+  bool test(String path);
 
-  /// Clears assets cache
-  static void clear() {
-    assets = {};
-  }
+  Future<ByteData> loadAsset(String path, HttpRequest request, String? mime);
 }
 
 class LocalAssetsServer {
@@ -64,16 +60,26 @@ class LocalAssetsServer {
   final Directory? _rootDir;
   HttpServer? _server;
 
+  final String index;
+
+  final String cacheValue;
+
   final Logger logger;
+
+  final CustomRequest? customRequest;
 
   LocalAssetsServer({
     required this.address,
     required this.assetsBasePath,
+
     // Pass this argument if you want your assets to be served from app directory, not from app bundle
     Directory? rootDir,
     // TCP port server will be listening on. Will choose an available port automatically if no port was passed
     this.port = 0,
+    this.index = 'index.html',
+    this.cacheValue = 'max-age=3600, must-revalidate',
     this.logger = const SilentLogger(),
+    this.customRequest,
   }) : this._rootDir = rootDir;
 
   /// Actual port server is listening on
@@ -90,22 +96,26 @@ class LocalAssetsServer {
   }
 
   Future<void> stop() async {
-    AssetsCache.clear();
     await _server?.close();
   }
 
   _handleReq(HttpRequest request) async {
     String path = request.requestedUri.path.replaceFirst('/', '');
 
-    if (path == '') {
-      path = 'index.html';
-    }
+    if (path == '') path = index;
 
     final name = basename(path);
     final mime = lookupMimeType(name);
 
     try {
-      final data = await _loadAsset(path);
+      late final ByteData data;
+
+      if (customRequest?.test(path) ?? false) {
+        data = await customRequest!.loadAsset(path, request, mime);
+      } else {
+        data = await _loadAsset(path);
+        request.response.headers.set(HttpHeaders.cacheControlHeader, cacheValue);
+      }
 
       request.response.headers.add('Content-Type', '$mime; charset=utf-8');
       request.response.add(data.buffer.asUint8List());
@@ -120,13 +130,8 @@ class LocalAssetsServer {
   }
 
   Future<ByteData> _loadAsset(String path) async {
-    if (AssetsCache.assets.containsKey(path)) {
-      return AssetsCache.assets[path]!;
-    }
-
     if (_rootDir == null) {
       ByteData data = await rootBundle.load(join(assetsBasePath, path));
-      AssetsCache.assets[path] = data;
       return data;
     }
 
